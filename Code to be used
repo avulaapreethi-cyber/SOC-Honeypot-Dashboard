@@ -1,0 +1,254 @@
+code: (to create dashboard)
+from flask import Flask, render_template_string
+from flask_socketio import SocketIO
+from pyngrok import ngrok
+import socket, threading, random, time, sqlite3
+from datetime import datetime
+app = Flask(__name__)
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
+PORTS = [2222, 8080]
+def init_db():
+    conn = sqlite3.connect("honeypot.db")
+    c = conn.cursor()
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TEXT,
+        ip TEXT,
+        port INTEGER
+    )
+    """)
+    conn.commit()
+    conn.close()
+def insert_log(timestamp, ip, port):
+    conn = sqlite3.connect("honeypot.db")
+    c = conn.cursor()
+    c.execute("INSERT INTO logs (timestamp, ip, port) VALUES (?, ?, ?)",
+              (timestamp, ip, port))
+    conn.commit()
+    conn.close()
+def load_stats():
+    conn = sqlite3.connect("honeypot.db")
+    c = conn.cursor()
+    c.execute("SELECT port, COUNT(*) FROM logs GROUP BY port")
+    port_data = dict(c.fetchall())
+    c.execute("""
+        SELECT substr(timestamp,12,8), COUNT(*)
+        FROM logs GROUP BY substr(timestamp,12,8)
+    """)
+    time_data = dict(c.fetchall())
+    conn.close()
+    return port_data, time_data
+
+def handle_client(client, addr, port):
+    now = datetime.now()
+    time_str = now.strftime("%Y-%m-%d %H:%M:%S")
+
+    log = f"{time_str} | {addr[0]} → Port {port}"
+    print(log)
+
+    insert_log(time_str, addr[0], port)
+
+    port_stats, time_stats = load_stats()
+
+    socketio.emit('update', {
+        "log": log,
+        "ports": port_stats,
+        "times": time_stats
+    })
+
+    try:
+        if port == 2222:
+            client.send(b"SSH-2.0-OpenSSH_8.2\r\n")
+        elif port == 8080:
+            client.send(b"HTTP/1.1 200 OK\r\n\r\n<h1>Welcome</h1>")
+    except:
+        pass
+
+    client.close()
+
+def start_port(port):
+    s = socket.socket()
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("0.0.0.0", port))
+    s.listen(5)
+    print(f"[+] Listening on {port}")
+
+    while True:
+        client, addr = s.accept()
+        threading.Thread(target=handle_client, args=(client, addr, port), daemon=True).start()
+
+def run_honeypot():
+    for p in PORTS:
+        threading.Thread(target=start_port, args=(p,), daemon=True).start()
+
+def simulate_attacks():
+    print("[SIM] Running...")
+    while True:
+        fake_ip = f"192.168.1.{random.randint(1,255)}"
+        port = random.choice(PORTS)
+
+        now = datetime.now()
+        time_str = now.strftime("%Y-%m-%d %H:%M:%S")
+
+        insert_log(time_str, fake_ip, port)
+
+        port_stats, time_stats = load_stats()
+
+        socketio.emit('update', {
+            "log": f"{time_str} | {fake_ip} → Port {port} (SIM)",
+            "ports": port_stats,
+            "times": time_stats
+        })
+
+        time.sleep(2)
+
+@app.route("/")
+def dashboard():
+    port_stats, time_stats = load_stats()
+
+    if not port_stats:
+        port_stats = {2222: 0, 8080: 0}
+
+    if not time_stats:
+        time_stats = {"00:00:00": 0}
+
+    return render_template_string("""
+<!DOCTYPE html>
+<html>
+<head>
+<title>SOC Honeypot Dashboard</title>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+
+<style>
+body {
+    background:#0b1220;
+    color:#e6edf3;
+    font-family:Arial;
+    margin:0;
+}
+.header {
+    padding:20px;
+    font-size:28px;
+    font-weight:bold;
+}
+.grid {
+    display:grid;
+    grid-template-columns:repeat(3,1fr);
+    gap:15px;
+    padding:20px;
+}
+.card {
+    background:#161b22;
+    padding:15px;
+    border-radius:10px;
+}
+.big {
+    font-size:26px;
+    color:#00ffff;
+}
+.logs {
+    height:300px;
+    overflow-y:auto;
+    font-size:13px;
+}
+</style>
+</head>
+
+<body>
+
+<div class="header">🐝 SOC Honeypot Dashboard</div>
+
+<div class="grid">
+
+<div class="card">
+<h3>Total Attacks</h3>
+<div id="total" class="big">0</div>
+</div>
+
+<div class="card">
+<h3>Unique IPs</h3>
+<div id="ips" class="big">0</div>
+</div>
+
+<div class="card">
+<h3>Active Ports</h3>
+<div id="ports" class="big">0</div>
+</div>
+
+<div class="card">
+<h3>Attacks per Port</h3>
+<canvas id="portChart"></canvas>
+</div>
+
+<div class="card">
+<h3>Traffic Over Time</h3>
+<canvas id="timeChart"></canvas>
+</div>
+
+<div class="card">
+<h3>Live Logs</h3>
+<div id="logs" class="logs"></div>
+</div>
+
+</div>
+
+<script>
+var socket = io();
+
+let total = 0;
+let ipSet = new Set();
+
+var portChart = new Chart(document.getElementById('portChart'), {
+    type:'bar',
+    data:{labels:[],datasets:[{data:[],backgroundColor:'#00ffff'}]},
+    options:{animation:false}
+});
+
+var timeChart = new Chart(document.getElementById('timeChart'), {
+    type:'line',
+    data:{labels:[],datasets:[{data:[],borderColor:'#00ff99'}]},
+    options:{animation:false}
+});
+
+socket.on('update', function(data){
+
+    total++;
+    document.getElementById("total").innerText = total;
+
+    let ip = data.log.split("|")[1].split("→")[0].trim();
+    ipSet.add(ip);
+    document.getElementById("ips").innerText = ipSet.size;
+
+    document.getElementById("ports").innerText = Object.keys(data.ports).length;
+
+    let div = document.createElement("div");
+    div.innerText = data.log;
+    document.getElementById("logs").prepend(div);
+
+    portChart.data.labels = Object.keys(data.ports);
+    portChart.data.datasets[0].data = Object.values(data.ports);
+    portChart.update();
+
+    timeChart.data.labels = Object.keys(data.times);
+    timeChart.data.datasets[0].data = Object.values(data.times);
+    timeChart.update();
+});
+</script>
+
+</body>
+</html>
+""", ports=port_stats, times=time_stats)
+
+if __name__ == "__main__":
+    init_db()
+    run_honeypot()
+
+    threading.Thread(target=simulate_attacks, daemon=True).start()
+
+    public_url = ngrok.connect(5000)
+    print(f"[+] Public Dashboard: {public_url}")
+
+    socketio.run(app, host="0.0.0.0", port=5000)
