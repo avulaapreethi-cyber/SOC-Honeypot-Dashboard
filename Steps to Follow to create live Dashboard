@@ -1,0 +1,36 @@
+STEP 1: Install Requirements
+command to be used
+    pip install flask flask-socketio pyngrok
+STEP 2: Create Python File
+Open Notepad
+give the code 
+Save as
+  honeypot.py
+make sure the file in 
+  C:\Users\YourName\
+STEP 3: Clean Old Database
+Delete old DB to avoid empty charts
+command to be used 
+    del honeypot.db
+STEP 4: Setup Ngrok
+1. Create account
+   Go to: https://dashboard.ngrok.com/signup
+2. Copy your auth token
+3. Add token in Command prompt
+         ngrok config add-authtoken YOUR_TOKEN
+STEP 5: Run the Project
+     python honeypot.py
+You should see
+Listening on 2222
+Listening on 8080
+[SIM] Running...
+Public Dashboard: https://xxxxx.ngrok-free.dev
+STEP 6: Open Dashboard
+Open browser and visit
+      https://xxxxx.ngrok-free.dev
+STEP 7: Verify It’s Working
+Within 2–5 seconds, you should see
+Charts moving
+Logs updating
+Numbers increasing
+
